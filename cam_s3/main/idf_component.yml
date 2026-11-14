@@ -1,0 +1,5 @@
+dependencies:
+  idf: ">=6.1"
+  espressif/esp32-camera: "^2.1.9"
+  # The GC0308 on this board has no JPEG output: frames are compressed on the S3
+  espressif/esp_new_jpeg: "^1.0.2"

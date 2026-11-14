@@ -1,0 +1,26 @@
+menu "Freenove camera"
+    config CAM_AP_SSID
+        string "Wi-Fi access point name"
+        default "JC8012-CAM"
+    config CAM_AP_PASSWORD
+        string "Wi-Fi password (min. 8 characters)"
+        default "jc8012cam"
+    config CAM_AP_CHANNEL
+        int "Wi-Fi channel"
+        range 1 13
+        default 1
+    choice CAM_FRAMESIZE
+        prompt "Picture size"
+        default CAM_FRAMESIZE_VGA
+        help
+            The GC0308 sensor delivers at most 640x480.
+        config CAM_FRAMESIZE_VGA
+            bool "VGA 640x480"
+        config CAM_FRAMESIZE_QVGA
+            bool "QVGA 320x240"
+    endchoice
+    config CAM_JPEG_QUALITY
+        int "JPEG quality (1-100, higher = better, larger frames)"
+        range 1 100
+        default 60
+endmenu

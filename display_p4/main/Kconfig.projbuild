@@ -1,0 +1,11 @@
+menu "Wireless camera"
+    config CAM_AP_SSID
+        string "Wi-Fi name of the camera"
+        default "JC8012-CAM"
+    config CAM_AP_PASSWORD
+        string "Wi-Fi password of the camera"
+        default "jc8012cam"
+    config CAM_STREAM_URL
+        string "MJPEG stream URL"
+        default "http://192.168.4.1/stream"
+endmenu

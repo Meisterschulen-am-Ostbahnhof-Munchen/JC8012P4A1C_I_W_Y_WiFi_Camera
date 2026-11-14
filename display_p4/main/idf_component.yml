@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=6.1"
+  espressif/esp_lcd_jd9365: "2.0.2"
+  # The on-board ESP32-C6 must run the same ESP-Hosted version, see JC8012P4A1C_I_W_Y_ESP_Hosted
+  espressif/esp_hosted: "2.11.7"
+  espressif/esp_wifi_remote: "*"
