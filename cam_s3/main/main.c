@@ -25,6 +25,7 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "lwip/sockets.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -50,6 +51,7 @@ static const char *TAG = "cam";
 #define CAM_PIN_HREF 7
 #define CAM_PIN_PCLK 13
 
+/* Sensors without JPEG output (GC0308): YUV422, compressed on the S3 */
 #if CONFIG_CAM_FRAMESIZE_QVGA
 #define CAM_FRAMESIZE FRAMESIZE_QVGA
 #define CAM_W 320
@@ -60,13 +62,26 @@ static const char *TAG = "cam";
 #define CAM_H 480
 #endif
 
+/* Sensors with JPEG output (OV2640, OV3660, OV5640): JPEG straight from the sensor */
+#if CONFIG_CAM_JPEG_FRAMESIZE_UXGA
+#define CAM_JPEG_FRAMESIZE FRAMESIZE_UXGA
+#elif CONFIG_CAM_JPEG_FRAMESIZE_HD
+#define CAM_JPEG_FRAMESIZE FRAMESIZE_HD
+#elif CONFIG_CAM_JPEG_FRAMESIZE_XGA
+#define CAM_JPEG_FRAMESIZE FRAMESIZE_XGA
+#else
+#define CAM_JPEG_FRAMESIZE FRAMESIZE_SVGA
+#endif
+
 #define JPEG_SLOTS 3
-#define JPEG_SLOT_SIZE (CAM_W * CAM_H) /* generous: a JPEG at quality 60 is ~10x smaller */
+#define JPEG_SLOT_SIZE (384 * 1024)
+
+static bool s_sensor_jpeg; /* true: the sensor delivers JPEG itself */
 
 #define PART_BOUNDARY "jc8012camframe"
 static const char *STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
-static const char *STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
-static const char *STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+/* Boundary and part header go out as one piece together with each frame */
+static const char *STREAM_PART = "\r\n--" PART_BOUNDARY "\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
 /* Triple-buffered JPEG frames shared between the encoder and the HTTP handlers */
 static uint8_t *s_slot[JPEG_SLOTS];
@@ -77,7 +92,7 @@ static uint32_t s_seq;                /* increments with every finished frame */
 static SemaphoreHandle_t s_lock;
 static volatile float s_encode_fps;
 
-static esp_err_t camera_init(void)
+static esp_err_t camera_init_format(pixformat_t format, framesize_t size)
 {
     camera_config_t cfg = {
         .pin_pwdn = CAM_PIN_PWDN,
@@ -99,19 +114,45 @@ static esp_err_t camera_init(void)
         .xclk_freq_hz = 20000000,
         .ledc_timer = LEDC_TIMER_0,
         .ledc_channel = LEDC_CHANNEL_0,
-        .pixel_format = PIXFORMAT_YUV422,
-        .frame_size = CAM_FRAMESIZE,
+        .pixel_format = format,
+        .frame_size = size,
+        .jpeg_quality = CONFIG_CAM_SENSOR_JPEG_QUALITY,
         .fb_count = 2,
         .fb_location = CAMERA_FB_IN_PSRAM,
         .grab_mode = CAMERA_GRAB_LATEST,
     };
-    esp_err_t err = esp_camera_init(&cfg);
-    if (err != ESP_OK) {
-        return err;
+    return esp_camera_init(&cfg);
+}
+
+/* JPEG from the sensor if it can, otherwise YUV422 for the S3 encoder. */
+static esp_err_t camera_init(void)
+{
+    esp_err_t err = camera_init_format(PIXFORMAT_JPEG, CAM_JPEG_FRAMESIZE);
+    s_sensor_jpeg = (err == ESP_OK);
+    if (!s_sensor_jpeg) {
+        esp_camera_deinit();
+        err = camera_init_format(PIXFORMAT_YUV422, CAM_FRAMESIZE);
+        if (err != ESP_OK) {
+            return err;
+        }
     }
     sensor_t *s = esp_camera_sensor_get();
+#if CONFIG_CAM_ROTATE_180
+    /* Turn the picture by 180° in the sensor (the OV2640 module sits upside down) */
+    if (s->set_vflip) {
+        s->set_vflip(s, 1);
+    }
+    if (s->set_hmirror) {
+        s->set_hmirror(s, 1);
+    }
+#endif
     camera_sensor_info_t *info = esp_camera_sensor_get_info(&s->id);
-    ESP_LOGI(TAG, "Camera sensor: %s, %dx%d YUV422", info ? info->name : "unknown", CAM_W, CAM_H);
+    const char *name = info ? info->name : "unknown";
+    if (s_sensor_jpeg) {
+        ESP_LOGI(TAG, "Camera sensor: %s, JPEG from the sensor", name);
+    } else {
+        ESP_LOGI(TAG, "Camera sensor: %s, %dx%d YUV422, JPEG encoded on the S3", name, CAM_W, CAM_H);
+    }
     return ESP_OK;
 }
 
@@ -134,7 +175,7 @@ static void encoder_task(void *arg)
     cfg.subsampling = JPEG_SUBSAMPLE_420;
     cfg.quality = CONFIG_CAM_JPEG_QUALITY;
     jpeg_enc_handle_t enc = NULL;
-    if (jpeg_enc_open(&cfg, &enc) != JPEG_ERR_OK) {
+    if (!s_sensor_jpeg && jpeg_enc_open(&cfg, &enc) != JPEG_ERR_OK) {
         ESP_LOGE(TAG, "jpeg_enc_open failed");
         vTaskDelete(NULL);
     }
@@ -151,6 +192,37 @@ static void encoder_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+        if (s_sensor_jpeg) {
+            /* Already JPEG: just publish a copy so the camera buffer goes back at once. */
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            int slot = pick_free_slot();
+            xSemaphoreGive(s_lock);
+            int len = fb->len;
+            if (slot >= 0 && len <= JPEG_SLOT_SIZE) {
+                memcpy(s_slot[slot], fb->buf, len);
+            } else {
+                slot = -1;
+            }
+            esp_camera_fb_return(fb);
+            if (slot < 0) {
+                ESP_LOGW(TAG, "JPEG frame too large (%d bytes)", len);
+                continue;
+            }
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            s_slot_len[slot] = len;
+            s_latest = slot;
+            s_seq++;
+            xSemaphoreGive(s_lock);
+            frames++;
+            int64_t now = esp_timer_get_time();
+            if (now - t0 >= 5000000) {
+                ESP_LOGI(TAG, "Sensor: %.1f fps, %d KB/frame", frames * 1e6f / (now - t0), len / 1024);
+                frames = 0;
+                t0 = now;
+            }
+            continue;
+        }
+
         const uint8_t *in = fb->buf;
         if (((uintptr_t)in & 15) != 0) {
             if (!aligned_in) {
@@ -246,7 +318,11 @@ static esp_err_t stream_handler(httpd_req_t *req)
 {
     esp_err_t res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-    char part[80];
+    /* Without TCP_NODELAY, Nagle holds back the small header piece until the previous
+     * segment is ACKed; with the receiver's delayed ACKs the rate collapsed to a few fps. */
+    int one = 1;
+    setsockopt(httpd_req_to_sockfd(req), IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    char part[128];
     uint32_t seq = 0;
     int frames = 0;
     size_t bytes = 0;
@@ -261,10 +337,7 @@ static esp_err_t stream_handler(httpd_req_t *req)
         }
         int len = s_slot_len[slot];
         int hlen = snprintf(part, sizeof(part), STREAM_PART, (unsigned)len);
-        res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
-        if (res == ESP_OK) {
-            res = httpd_resp_send_chunk(req, part, hlen);
-        }
+        res = httpd_resp_send_chunk(req, part, hlen);
         if (res == ESP_OK) {
             res = httpd_resp_send_chunk(req, (const char *)s_slot[slot], len);
         }

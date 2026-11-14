@@ -47,8 +47,8 @@ static const char *TAG = "wcam";
 #define LCD_BACKLIGHT GPIO_NUM_23
 #define LCD_RESET GPIO_NUM_27
 
-#define MAX_FRAME_W 1280
-#define MAX_FRAME_H 960
+#define MAX_FRAME_W 1600
+#define MAX_FRAME_H 1200
 #define JPEG_IN_SIZE (512 * 1024)
 
 static esp_lcd_panel_handle_t s_panel;

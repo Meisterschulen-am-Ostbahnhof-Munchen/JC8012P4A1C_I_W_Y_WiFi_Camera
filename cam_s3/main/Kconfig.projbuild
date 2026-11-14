@@ -9,8 +9,24 @@ menu "Freenove camera"
         int "Wi-Fi channel"
         range 1 13
         default 1
+    choice CAM_JPEG_FRAMESIZE
+        prompt "Picture size for sensors with JPEG output (OV2640, OV3660, OV5640)"
+        default CAM_JPEG_FRAMESIZE_SVGA
+        config CAM_JPEG_FRAMESIZE_SVGA
+            bool "SVGA 800x600"
+        config CAM_JPEG_FRAMESIZE_XGA
+            bool "XGA 1024x768"
+        config CAM_JPEG_FRAMESIZE_HD
+            bool "HD 1280x720"
+        config CAM_JPEG_FRAMESIZE_UXGA
+            bool "UXGA 1600x1200"
+    endchoice
+    config CAM_SENSOR_JPEG_QUALITY
+        int "Sensor JPEG quality (0-63, lower = better, larger frames)"
+        range 0 63
+        default 12
     choice CAM_FRAMESIZE
-        prompt "Picture size"
+        prompt "Picture size for sensors without JPEG output (GC0308)"
         default CAM_FRAMESIZE_VGA
         help
             The GC0308 sensor delivers at most 640x480.
@@ -20,7 +36,12 @@ menu "Freenove camera"
             bool "QVGA 320x240"
     endchoice
     config CAM_JPEG_QUALITY
-        int "JPEG quality (1-100, higher = better, larger frames)"
+        int "S3 encoder JPEG quality for sensors without JPEG output (1-100, higher = better)"
         range 1 100
         default 60
+    config CAM_ROTATE_180
+        bool "Rotate the picture by 180 degrees (in the sensor)"
+        default y
+        help
+            The OV2640 module on the Freenove board is mounted upside down.
 endmenu
